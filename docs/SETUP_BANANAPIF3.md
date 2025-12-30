@@ -65,5 +65,21 @@ sudo dd if=./FSBL.bin of=/dev/sda bs=1K seek=128
 
 Once this is flashed, you can delete other partitions (useful tip: You can use `gparted` in linux because it also shows the partition names).
 
+If you insert the SD card in the board and attach the serial console, you will see the following prompt on the console (use minicom or picocom on linux to view the serial console).
+
+```
+sys: 0x600                                                                
+bm:3                                                                      
+j...                                                                      
+                                                                          
+U-Boot SPL 2022.10spacemit-gd9d9d6ff0 (Dec 29 2025 - 18:32:52 +0500)      
+[   0.358] DDR type LPDDR4X                                               
+[   0.376] lpddr4_silicon_init consume 18ms                               
+[   0.377] Change DDR data rate to 2400MT/s                               
+                                                                          
+Inside board_init_r                                                       
+CCCCCCCCCC
+```
+
 
 At this point the banana pi f3 is ready for kernelci with the flashed SD Card.
