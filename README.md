@@ -19,6 +19,12 @@ Documentation chronological sequence is as follows.
 - Describes how to add device template and connection configuration in `/etc/ser2net.yaml`
 - Describes how to run first job to check the connection
 
+## [Setting up RISC-V device (Banana Pi F3) for KernelCI](/docs/SETUP_BANANAPIF3.md):
+
+- Describes the bootflow of Banana Pi F3
+- Describes how to format the sd card and prepare the Board for KernelCI/LAVA
+- Describes where to get the binary files (FSBL, U-Boot etc.)
+
 ## [Adding RISC-V device (Banana Pi F3)](/docs/ADDING_BPI-F3.md):
 
 - Describes how to add a newer physical board in LAVA worker and then add it in the lava-server
