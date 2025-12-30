@@ -2,7 +2,7 @@
 
 Before we get to run tests on banana pi f3 for uboot and linux kernel we need to have the setup ready. Getting the setup ready means that board should be in a state to recieve U-Boot proper, OpenSBI and Linux kernel binaries everytime the board starts. 
 
-For this purpose, the source code of the U-Boot is modified so that FSBL polls for U-Boot proper and OpenSBI binaries to be provided through UART (sz) on start. The modified source code is available in this [repository](https://github.com/BPI-SINOVOIP/pi-u-boot/compare/v2022.10-k1-v2.0...alitariq4589:pi-u-boot:v2022.10-k1-v2.0).
+For this purpose, the source code of the U-Boot is modified so that FSBL polls for U-Boot proper and OpenSBI binaries to be provided through UART (sz) on start. The modified source code is available in this [repository](https://github.com/alitariq4589/pi-u-boot/tree/v2022.10-k1-v2.0#).
 
 The Bootflow of the banana pi f3 board is `On chip firmware -> U-boot SPL -> OpenSBI -> U-Boot Proper -> Linux Kernel`.
 
@@ -61,7 +61,6 @@ Here you only have to flash the `FSBL.bin` which you acquired in the previous st
 
 ```
 sudo dd if=./FSBL.bin of=/dev/sda bs=1K seek=128
-
 ```
 
 Once this is flashed, you can delete other partitions (useful tip: You can use `gparted` in linux because it also shows the partition names).
