@@ -81,5 +81,6 @@ Inside board_init_r
 CCCCCCCCCC
 ```
 
+This prompt means the board is asking for U-Boot or opensbi to be transfered to it through UART (hint: you can use `sz` command for this or try the key combination for sz inside the minicom console)
 
 At this point the banana pi f3 is ready for kernelci with the flashed SD Card.
