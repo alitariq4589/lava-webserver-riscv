@@ -1,0 +1,50 @@
+{% extends 'base-uboot.jinja2' %}
+
+{% set connection_list = ['uart0'] %}
+{% set connection_commands = {'uart0': 'telnet localhost 5002'} %}
+{% set connection_tags = {'uart0': ['primary', 'telnet']} %}
+
+{% set power_off_command = "/usr/local/bin/tuya-power off 2" %}
+{% set power_on_command = "/usr/local/bin/tuya-power on 2" %}
+{% set hard_reset_command = "sh -c '/usr/local/bin/tuya-power off 2; sleep 5; /usr/local/bin/tuya-power on 2'" %}
+{% set bootloader_prompt = '=>' %}
+{% set bootloader_terminal = 'uart0' %}
+{% set extra_boot_methods = '' %}
+
+# Stock SpacemiT U-Boot (2022.10ky) in the on-board NOR; its saved env has
+# bootcmd='echo LAVA', so like the BPI-F3 it drops straight to the prompt.
+{% set interrupt_prompt = '=>' %}
+{% set uboot_needs_interrupt = False %}
+
+# Load addresses (same DDR layout as the BPI-F3). Setting booti_* makes LAVA
+# boot the plain Image with booti instead of wrapping it into a uImage.
+{% set booti_kernel_addr = '0x11000000' %}
+{% set booti_ramdisk_addr = '0x21000000' %}
+{% set booti_dtb_addr = '0x31000000' %}
+{% set uboot_mkimage_arch = 'riscv' %}
+
+# 64-bit all-Fs, or the FDT/initrd relocation fails on this board.
+{% set uboot_fdt_high = '0xffffffffffffffff' %}
+{% set uboot_initrd_high = '0xffffffffffffffff' %}
+
+# Isolated board link, no DHCP: static address. serverip comes from
+# dispatcher_ip (192.168.2.2) via {SERVER_IP}.
+{% set uboot_ipaddr_cmd = 'setenv ipaddr 192.168.2.6; setenv netmask 255.255.255.0' %}
+{% set base_ip_args = 'ip=192.168.2.6:192.168.2.2::255.255.255.0::eth0:off' %}
+
+# 'tftp' is ambiguous on this U-Boot (tftpput/tftpsrv are built in): spell out tftpboot.
+{% set uboot_tftp_commands = [
+    "tftpboot {KERNEL_ADDR} {KERNEL}",
+    "tftpboot {RAMDISK_ADDR} {RAMDISK}",
+    "setenv initrd_size ${filesize}",
+    "tftpboot {DTB_ADDR} {DTB}"
+] %}
+
+
+# net.ifnames=0: the Debian NFS initrd's systemd-udev otherwise renames eth0 ->
+# end0, and the initramfs NFS scripts (looking for eth0 from the ip= arg) wait
+# ~3 min on that before falling through. Keeping the name eth0 makes NFS boot clean.
+{% set base_kernel_args = 'console=ttyS0,115200n8 earlycon=sbi net.ifnames=0' %}
+
+# NFS root: riscv defconfig has NFS_V2=y, which makes nfsroot default to v2; Debian's server has v2 off.
+{% set base_nfsroot_args = 'nfsroot={NFS_SERVER_IP}:{NFSROOTFS},vers=3,tcp,hard' %}

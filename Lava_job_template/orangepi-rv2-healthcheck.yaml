@@ -1,0 +1,53 @@
+# Orange Pi RV2 health check: mainline kernel + DTB + buildroot ramdisk over
+# TFTP from the dispatcher, then a smoke test in the booted shell.
+#
+# /srv/lava/rv2/Image                mainline arch/riscv/boot/Image (riscv defconfig)
+# /srv/lava/rv2/k1-orangepi-rv2.dtb  arch/riscv/boot/dts/spacemit/k1-orangepi-rv2.dtb, same build
+# /srv/lava/rv2/rootfs.cpio.gz       KernelCI buildroot-baseline riscv rootfs (prompt "~ #")
+
+device_type: orangepi-rv2
+job_name: orangepi-rv2 health check (tftp ramdisk boot)
+priority: medium
+visibility: public
+
+timeouts:
+  job:
+    minutes: 15
+  action:
+    minutes: 5
+  connection:
+    minutes: 2
+
+actions:
+- deploy:
+    timeout:
+      minutes: 5
+    to: tftp
+    os: oe
+    kernel:
+      url: file:///srv/lava/rv2/Image
+      type: image
+    dtb:
+      url: file:///srv/lava/rv2/k1-orangepi-rv2.dtb
+    ramdisk:
+      url: file:///srv/lava/rv2/rootfs.cpio.gz
+      compression: gz
+
+- boot:
+    timeout:
+      minutes: 5
+    method: u-boot
+    commands: ramdisk
+    prompts:
+    - '~ #'
+
+- test:
+    timeout:
+      minutes: 5
+    definitions:
+    - repository: https://github.com/Linaro/test-definitions
+      from: git
+      path: automated/linux/smoke/smoke.yaml
+      name: smoke-tests
+      params:
+        TESTS: "pwd, uname -a, ip a, lscpu, vmstat, lsblk"

@@ -1,0 +1,73 @@
+# Orange Pi RV2: NFS root (KernelCI Debian trixie-kselftest, riscv64) + kselftest.
+#
+# /srv/lava/rv2/Image, k1-orangepi-rv2.dtb        mainline build (rv2-build-and-send-lava.sh)
+# /srv/lava/rv2/trixie-kselftest.rootfs.tar.xz     storage.kernelci.org .../trixie-kselftest/<ver>/riscv64/full.rootfs.tar.xz
+# /srv/lava/rv2/trixie-kselftest.initrd.cpio.gz    same dir, initrd.cpio.gz (mounts the NFS root)
+# /srv/lava/rv2/kselftest.tar.xz                   opt/kselftest/... built from the same tree
+#                                                  (make -C tools/testing/selftests TARGETS=... install)
+# Host needs nfs-kernel-server; LAVA exports the extracted rootfs per job.
+
+device_type: orangepi-rv2
+job_name: orangepi-rv2 kselftest (nfs root)
+priority: medium
+visibility: public
+
+timeouts:
+  job:
+    minutes: 60
+  action:
+    minutes: 15
+  connection:
+    minutes: 5
+
+actions:
+- deploy:
+    timeout:
+      minutes: 15
+    to: tftp
+    os: debian
+    kernel:
+      url: file:///srv/lava/rv2/Image
+      type: image
+    dtb:
+      url: file:///srv/lava/rv2/k1-orangepi-rv2.dtb
+    ramdisk:
+      url: file:///srv/lava/rv2/trixie-kselftest.initrd.cpio.gz
+      compression: gz
+    nfsrootfs:
+      url: file:///srv/lava/rv2/trixie-kselftest.rootfs.tar.xz
+      compression: xz
+    modules:
+      url: file:///srv/lava/rv2/kselftest.tar.xz
+      compression: xz
+
+- boot:
+    timeout:
+      minutes: 10
+    method: u-boot
+    commands: nfs
+    auto_login:
+      login_prompt: 'login:'
+      username: root
+    # This rootfs drops root to a busybox-style prompt '/ # ', not bash's
+    # 'root@host:~#'. Keep the bash pattern too in case a future image changes.
+    prompts:
+    - '/ # '
+    - 'root@(.*):[/~]#'
+
+- test:
+    timeout:
+      minutes: 30
+    definitions:
+    - repository: https://github.com/Linaro/test-definitions
+      from: git
+      path: automated/linux/kselftest/kselftest.yaml
+      name: kselftest
+      params:
+        SKIP_INSTALL: "true"
+        KSELFTEST_PATH: /opt/kselftest
+        TST_CMDFILES: "size dt exec"
+        # kselftest.sh mishandles an empty -S: '' is misread as an http URL and
+        # it dies on `wget ''`. A non-empty, non-url, non-.yaml token routes to
+        # the plain-skipfile branch; the file doesn't exist so no skips apply.
+        SKIPFILE: "none"

@@ -1,0 +1,6 @@
+# Device dictionary for the physical board orangepi-rv2-1.
+# Everything board-specific already lives in the device-type template
+# (orangepi-rv2.jinja2) because there is one RV2 in the lab; a second RV2
+# would move the ser2net port and PDU outlet lines here instead.
+# Install as /etc/lava-server/dispatcher-config/devices/orangepi-rv2-1.jinja2
+{% extends 'orangepi-rv2.jinja2' %}
