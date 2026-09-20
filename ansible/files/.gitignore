@@ -1,0 +1,2 @@
+# The PDU script embeds Tuya cloud credentials — it must never be committed.
+tuya-power

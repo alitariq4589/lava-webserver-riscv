@@ -1,0 +1,245 @@
+---
+# Host-side setup for kernelci-1 (LAVA server + worker-2 on one Debian box).
+#
+# Covers everything the RV2 bring-up did by hand on the HOST — packages,
+# LAVA settings.d, dispatcher_ip, board network link, ufw, ser2net, the
+# RV2 device-type/device/health-check files, staging dir, rootfs images,
+# and LAVA registration. See docs/ADDING_ORANGEPI_RV2.md for the manual
+# version of every step (that doc is the debugging companion of this file).
+#
+# NOT covered, by design:
+#   - the board's own one-time U-Boot env change (bootcmd='echo LAVA')
+#   - the workstation kernel build/ship (linux-kernel-notes rv2-build-and-send-lava.sh)
+#   - the public name kernelci.cloud-v.co (Traefik on the Cloud-V Linode,
+#     managed in the odoo-prod playbook of that infrastructure's repo)
+#   - initial lava-server DB setup (users, worker token) — docs/GETTING_STARTED.md
+#   - the tuya-power PDU script's credentials/venv — see ansible/files/README.md
+#
+# Run from the repo root:
+#   ansible-playbook -i ansible/inventory ansible/kernelci-host.yml
+# or directly on the host:
+#   ansible-playbook -i 'localhost,' -c local ansible/kernelci-host.yml
+
+- name: kernelci-1 LAVA host
+  hosts: lava_host
+  become: true
+
+  vars:
+    worker_name: worker-2
+    # Isolated board link: second NIC, static, no DHCP. The office-LAN NIC
+    # is untouched.
+    board_nic: enx00aa3458890a
+    board_link_addr: 192.168.2.2
+    board_link_cidr: "{{ board_link_addr }}/24"
+    board_subnet: 192.168.2.0/24
+    # Orange Pi RV2 console
+    rv2_serial: /dev/serial/by-id/usb-1a86_USB_Serial-if00-port0
+    rv2_ser2net_port: 5002
+    # Where the workstation build script scp's kernel artifacts
+    staging_dir: /srv/lava/rv2
+    staging_owner: ali
+    # KernelCI rootfs images, version-pinned — bump deliberately, together
+    # with the file names the jobs reference.
+    rootfs_images:
+      - url: https://storage.kernelci.org/images/rootfs/buildroot/buildroot-baseline/20260915.0/riscv/rootfs.cpio.gz
+        dest: "{{ staging_dir }}/rootfs.cpio.gz"
+      - url: https://storage.kernelci.org/images/rootfs/debian/trixie-kselftest/20260915.0/riscv64/full.rootfs.tar.xz
+        dest: "{{ staging_dir }}/trixie-kselftest.rootfs.tar.xz"
+      - url: https://storage.kernelci.org/images/rootfs/debian/trixie-kselftest/20260915.0/riscv64/initrd.cpio.gz
+        dest: "{{ staging_dir }}/trixie-kselftest.initrd.cpio.gz"
+
+  tasks:
+    # ---- packages ----------------------------------------------------------
+    - name: LAVA apt signing key
+      ansible.builtin.shell: |
+        set -o pipefail
+        curl -fsSL https://apt.lavasoftware.org/lavasoftware.key.asc | gpg --dearmor > /usr/share/keyrings/lavasoftware.gpg
+      args:
+        creates: /usr/share/keyrings/lavasoftware.gpg
+        executable: /bin/bash
+
+    - name: LAVA apt repository
+      ansible.builtin.copy:
+        dest: /etc/apt/sources.list.d/lavasoftware.list
+        content: "deb [signed-by=/usr/share/keyrings/lavasoftware.gpg] https://apt.lavasoftware.org/release bookworm main\n"
+        mode: "0644"
+
+    - name: Install packages
+      ansible.builtin.apt:
+        name:
+          - postgresql
+          - lava-server
+          - lava-dispatcher
+          - lavacli
+          - ser2net
+          - tftpd-hpa
+          - nfs-kernel-server   # the lava packaging exports /var/lib/lava/dispatcher/tmp
+                                # in /etc/exports itself — never add a second entry
+        state: present
+        update_cache: true
+
+    # ---- lava-server settings ---------------------------------------------
+    - name: LAVA settings.d (allowed hosts, CSRF origins, proxy SSL header)
+      ansible.builtin.copy:
+        dest: "/etc/lava-server/settings.d/{{ item.name }}"
+        content: "{{ item.content }}"
+        owner: lavaserver
+        group: lavaserver
+        mode: "0640"
+      loop:
+        - name: 10-allowed-hosts.yaml
+          content: |
+            ALLOWED_HOSTS: ["*"]
+        - name: 20-csrf-trusted-origins.yaml
+          content: |
+            CSRF_TRUSTED_ORIGINS: ["http://localhost", "http://192.168.101.204", "https://kernelci.cloud-v.co"]
+        - name: 30-proxy-ssl.yaml
+          content: |
+            SECURE_PROXY_SSL_HEADER: ["HTTP_X_FORWARDED_PROTO", "https"]
+      loop_control:
+        label: "{{ item.name }}"
+      notify: restart lava-server-gunicorn
+
+    - name: Dispatcher config directory for {{ worker_name }}
+      ansible.builtin.file:
+        path: "/etc/lava-server/dispatcher.d/{{ worker_name }}"
+        state: directory
+        mode: "0755"
+
+    - name: dispatcher_ip on the board link ({SERVER_IP} in rendered jobs)
+      ansible.builtin.copy:
+        dest: "/etc/lava-server/dispatcher.d/{{ worker_name }}/dispatcher.yaml"
+        content: "dispatcher_ip: {{ board_link_addr }}\n"
+        mode: "0644"
+
+    # ---- board network + firewall -----------------------------------------
+    - name: Existing NetworkManager connections
+      ansible.builtin.command: nmcli -g NAME con show
+      register: nm_cons
+      changed_when: false
+
+    - name: lab-boards static link on {{ board_nic }}
+      ansible.builtin.command: >
+        nmcli con add type ethernet ifname {{ board_nic }} con-name lab-boards
+        ipv4.method manual ipv4.addresses {{ board_link_cidr }}
+      when: "'lab-boards' not in nm_cons.stdout_lines"
+
+    - name: ufw rules (web UI + board subnet)
+      ansible.builtin.command: "{{ item }}"
+      loop:
+        - ufw allow 80/tcp
+        - ufw allow 443/tcp
+        - ufw allow in on {{ board_nic }} from {{ board_subnet }}
+      register: ufw_rule
+      changed_when: "'Skipping' not in ufw_rule.stdout"
+
+    # ---- serial console ----------------------------------------------------
+    # If the RV2 block was ever added to /etc/ser2net.yaml by hand (no ANSIBLE
+    # markers), delete it once; from then on this block owns it. The accepter
+    # MUST be telnet(rfc2217) — a raw tcp accepter delivers \r\n, doubles every
+    # prompt, and LAVA runs commands ahead of U-Boot (job 298).
+    - name: Read ser2net.yaml
+      ansible.builtin.slurp:
+        src: /etc/ser2net.yaml
+      register: ser2net_raw
+
+    - name: ser2net entry for the RV2 console
+      ansible.builtin.blockinfile:
+        path: /etc/ser2net.yaml
+        marker: "# {mark} ANSIBLE MANAGED orangepi-rv2-1"
+        block: |
+          connection: &orangepi-rv2-1
+            accepter: telnet(rfc2217),tcp,localhost,{{ rv2_ser2net_port }}
+            enable: on
+            options:
+              kickolduser: true
+            connector: serialdev,
+                       {{ rv2_serial }},
+                       115200n81,local
+      vars:
+        ser2net_txt: "{{ ser2net_raw.content | b64decode }}"
+      when: "'ANSIBLE MANAGED orangepi-rv2-1' in ser2net_txt or 'orangepi-rv2-1' not in ser2net_txt"
+      notify: restart ser2net
+
+    # ---- PDU ---------------------------------------------------------------
+    - name: tuya-power PDU script (only when provided in ansible/files/ — not in git)
+      ansible.builtin.copy:
+        src: tuya-power
+        dest: /usr/local/bin/tuya-power
+        owner: root
+        group: root
+        mode: "0700"
+      when: lookup('ansible.builtin.fileglob', 'files/tuya-power') | length > 0
+
+    # ---- LAVA device config from this repo --------------------------------
+    - name: Device-type template
+      ansible.builtin.copy:
+        src: ../device_templates/orangepi-rv2.jinja2
+        dest: /etc/lava-server/dispatcher-config/device-types/orangepi-rv2.jinja2
+        mode: "0644"
+
+    - name: Device dictionary
+      ansible.builtin.copy:
+        src: ../device_templates/orangepi-rv2-1.jinja2
+        dest: /etc/lava-server/dispatcher-config/devices/orangepi-rv2-1.jinja2
+        mode: "0644"
+
+    - name: Health check for the orangepi-rv2 device type
+      ansible.builtin.copy:
+        src: ../Lava_job_template/orangepi-rv2-healthcheck.yaml
+        dest: /etc/lava-server/dispatcher-config/health-checks/orangepi-rv2.yaml
+        mode: "0644"
+
+    # ---- artifact staging --------------------------------------------------
+    - name: Staging dir the workstation ships into
+      ansible.builtin.file:
+        path: "{{ staging_dir }}"
+        state: directory
+        owner: "{{ staging_owner }}"
+        mode: "0755"
+
+    - name: KernelCI rootfs images
+      ansible.builtin.get_url:
+        url: "{{ item.url }}"
+        dest: "{{ item.dest }}"
+        mode: "0644"
+      loop: "{{ rootfs_images }}"
+      loop_control:
+        label: "{{ item.dest }}"
+
+    # ---- LAVA registration -------------------------------------------------
+    - name: Registered device types
+      ansible.builtin.command: lava-server manage device-types list
+      register: lava_dtypes
+      changed_when: false
+
+    - name: Register device type orangepi-rv2
+      ansible.builtin.command: lava-server manage device-types add orangepi-rv2
+      when: "'orangepi-rv2' not in lava_dtypes.stdout"
+
+    - name: Registered devices
+      ansible.builtin.command: lava-server manage devices list --all
+      register: lava_devices
+      changed_when: false
+
+    - name: Register device orangepi-rv2-1 on {{ worker_name }}
+      ansible.builtin.command: >
+        lava-server manage devices add
+        --device-type orangepi-rv2 --worker {{ worker_name }} orangepi-rv2-1
+      when: "'orangepi-rv2-1' not in lava_devices.stdout"
+      register: rv2_added
+
+    - name: Trigger the first health check (only on fresh registration)
+      ansible.builtin.command: lava-server manage devices update orangepi-rv2-1 --health UNKNOWN
+      when: rv2_added is changed
+
+  handlers:
+    - name: restart lava-server-gunicorn
+      ansible.builtin.service:
+        name: lava-server-gunicorn
+        state: restarted
+
+    - name: restart ser2net
+      ansible.builtin.service:
+        name: ser2net
+        state: restarted
