@@ -37,3 +37,19 @@ Documentation chronological sequence is as follows.
   - Host Machine NFS Server Setup
   - Booting the Linux kernel on BPI-F3
 - Automating with LAVA Job (.yaml) File
+
+## [Adding RISC-V device (Orange Pi RV2) and running kselftest over NFS](/docs/ADDING_ORANGEPI_RV2.md):
+
+- Describes the full bring-up of the Orange Pi RV2 (SpacemiT Ky X1 / K1) using its stock NOR U-Boot — nothing flashed, no SD/USB media
+- PDU via a Tuya cloud smart power strip, ser2net console, isolated board network segment
+- TFTP ramdisk health check, then a kselftest job on an NFS root with a mainline kernel
+- Companion files in this repo: `device_templates/orangepi-rv2*.jinja2`, `Lava_job_template/orangepi-rv2-*.yaml`
+
+## [How LAVA works (concepts)](/docs/LAVA_CONCEPTS.md):
+
+- The mental model behind all of the above: server vs dispatcher, device types / devices / workers, what deploy/boot/test actually do, and how results travel back over the serial console
+- Every failure from the RV2 bring-up mapped to the concept it teaches, plus a debugging checklist
+
+## Automation
+
+[`ansible/kernelci-host.yml`](/ansible/kernelci-host.yml) applies the whole host-side configuration (packages, LAVA settings, board network, ser2net, device-type/device/health-check files, rootfs images, LAVA registration), so a host rebuild — or the next board — doesn't mean repeating the manual steps. The playbook header lists what it deliberately leaves out (board U-Boot env, workstation builds, the public domain on the edge proxy, PDU credentials).
