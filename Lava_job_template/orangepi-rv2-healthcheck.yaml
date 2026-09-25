@@ -25,10 +25,10 @@ actions:
     to: tftp
     os: oe
     kernel:
-      url: file:///srv/lava/rv2/Image
+      url: https://github.com/alitariq4589/lava-webserver-riscv/releases/download/rv2-latest/Image
       type: image
     dtb:
-      url: file:///srv/lava/rv2/k1-orangepi-rv2.dtb
+      url: https://github.com/alitariq4589/lava-webserver-riscv/releases/download/rv2-latest/k1-orangepi-rv2.dtb
     ramdisk:
       url: file:///srv/lava/rv2/rootfs.cpio.gz
       compression: gz

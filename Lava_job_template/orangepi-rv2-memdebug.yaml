@@ -1,0 +1,112 @@
+# Orange Pi RV2: memory-debug kernel (KASAN/KFENCE/kmemleak/lockdep) on NFS root.
+#
+# Kernel: /srv/lava/rv2/Image-debug — built with `DEBUG=1 rv2-build-and-send-lava.sh`.
+# Everything else is the kselftest job's setup. KASAN/lockdep splats are caught
+# two ways: LAVA's own console watching during boot, and the dmesg-clean test
+# case after the exercising. Leaks need an explicit kmemleak scan — last steps.
+# The PCIe remove/rescan loop exercises the teardown/probe paths where driver
+# leaks usually live; swap the device or add bind/unbind loops for whatever
+# driver is under test.
+#
+# KASAN roughly doubles memory use and slows everything 2-4x — hence the
+# longer timeouts and the bigger TFTP transfer.
+
+device_type: orangepi-rv2
+job_name: orangepi-rv2 memory debug (KASAN + kmemleak, nfs root)
+priority: medium
+visibility: public
+
+timeouts:
+  job:
+    minutes: 120
+  action:
+    minutes: 30
+  connection:
+    minutes: 10
+
+actions:
+- deploy:
+    timeout:
+      minutes: 20
+    to: tftp
+    os: debian
+    kernel:
+      url: https://github.com/alitariq4589/lava-webserver-riscv/releases/download/rv2-debug/Image-debug
+      type: image
+    dtb:
+      url: https://github.com/alitariq4589/lava-webserver-riscv/releases/download/rv2-debug/k1-orangepi-rv2.dtb
+    ramdisk:
+      url: file:///srv/lava/rv2/trixie-kselftest.initrd.cpio.gz
+      compression: gz
+    nfsrootfs:
+      url: file:///srv/lava/rv2/trixie-kselftest.rootfs.tar.xz
+      compression: xz
+    modules:
+      url: https://github.com/alitariq4589/lava-webserver-riscv/releases/download/rv2-debug/kselftest.tar.xz
+      compression: xz
+
+- boot:
+    timeout:
+      minutes: 20
+    method: u-boot
+    commands: nfs
+    auto_login:
+      login_prompt: 'login:'
+      username: root
+    prompts:
+    - '/ # '
+    - 'root@(.*):[/~]#'
+
+- test:
+    timeout:
+      minutes: 45
+    definitions:
+    - repository: https://github.com/Linaro/test-definitions
+      from: git
+      path: automated/linux/kselftest/kselftest.yaml
+      name: kselftest
+      params:
+        SKIP_INSTALL: "true"
+        KSELFTEST_PATH: /opt/kselftest
+        TST_CMDFILES: "size dt exec"
+        SKIPFILE: "none"
+
+- test:
+    timeout:
+      minutes: 20
+    definitions:
+    - from: inline
+      name: memcheck
+      path: inline/memcheck.yaml
+      repository:
+        metadata:
+          format: Lava-Test Test Definition 1.0
+          name: memcheck
+          description: "KASAN sanity, PCIe remove/rescan exercise, dmesg splat check, kmemleak scan"
+          os:
+          - debian
+          scope:
+          - functional
+        run:
+          steps:
+          # Prove we are actually on the debug kernel, not a stale Image-debug.
+          - lava-test-case kasan-active --shell 'dmesg | grep -q KernelAddressSanitizer'
+          - lava-test-case kmemleak-present --shell 'test -e /sys/kernel/debug/kmemleak'
+          # Exercise teardown/probe paths: remove and rescan the NVMe endpoint
+          # 20 times. Root is on NFS, so the NVMe is safe to yank.
+          - if [ -e /sys/bus/pci/devices/0001:01:00.0 ]; then for i in $(seq 1 20); do echo 1 > /sys/bus/pci/devices/0001:01:00.0/remove; sleep 1; echo 1 > /sys/bus/pci/rescan; sleep 2; done; fi
+          - lava-test-case pci-rescan-survived --shell 'test -e /sys/bus/pci/devices/0001:01:00.0'
+          # DEMO kernels only (LKDTM built in): trigger a real use-after-free so
+          # KASAN fires on the console; silently skipped on normal debug kernels.
+          - if [ -e /sys/kernel/debug/provoke-crash/DIRECT ]; then cat /sys/kernel/debug/provoke-crash/DIRECT; echo READ_AFTER_FREE > /sys/kernel/debug/provoke-crash/DIRECT || true; fi
+          # Any KASAN/UBSAN/lockdep/sleep-in-atomic report fails this case.
+          - dmesg | grep -E -B2 -A25 'BUG:|KASAN|UBSAN:|possible circular locking|possible recursive locking|inconsistent lock state' || true
+          - lava-test-case dmesg-clean --shell '! dmesg | grep -qE "BUG:|KASAN|UBSAN:|possible circular locking|possible recursive locking|inconsistent lock state"'
+          # kmemleak needs explicit scans; first pass has transient false
+          # positives, so scan, settle, scan again, then read.
+          - echo scan > /sys/kernel/debug/kmemleak
+          - sleep 30
+          - echo scan > /sys/kernel/debug/kmemleak
+          - sleep 5
+          - cat /sys/kernel/debug/kmemleak
+          - lava-test-case kmemleak-clean --shell '! grep -q . /sys/kernel/debug/kmemleak'

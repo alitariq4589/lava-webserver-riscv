@@ -143,9 +143,9 @@ The last line shows the TFTP root (`/srv/tftp` on this host). LAVA reads that sa
 
 ## 5. Boot inputs
 
-Three files in `/srv/lava/rv2/`:
+Artifacts split by how often they change. The per-build ones (`Image` / `Image-debug`, `k1-orangepi-rv2.dtb`, `kselftest.tar.xz`) are **published to rolling GitHub release channels** and the jobs download them over https — `rv2-latest` for normal builds, `rv2-debug` for `DEBUG=1` builds, assets replaced in place with `--clobber` so the job URLs never change and any lab can run the same job YAML (one-time: `gh auth login`; the channels live on this repo itself — `GH_REPO` in the script). The static rootfs images stay in `/srv/lava/rv2/` on the host as `file://` URLs.
 
-- `Image` and `k1-orangepi-rv2.dtb` — the same mainline/for-next build `rv2-build-and-send.sh` already produces for the board, shipped to the LAVA host instead. `rv2-build-and-send-lava.sh` (next to it in `linux-kernel-notes/scripts/kernel_build_scripts/opirv2/`) does exactly that: same `.config`, same SpacemiT toolchain, same DTB, `Image dtbs` (no kernel modules — the buildroot ramdisk loads none) plus the kselftest collections in `KSELFTEST_TARGETS` packed as `kselftest.tar.xz`, then `scp` into `/srv/lava/rv2/`. On the workstation, inside the kernel checkout:
+- `Image` and `k1-orangepi-rv2.dtb` — the same mainline/for-next build `rv2-build-and-send.sh` already produces for the board. `rv2-build-and-send-lava.sh` (next to it in `linux-kernel-notes/scripts/kernel_build_scripts/opirv2/`) does exactly that: same `.config`, same SpacemiT toolchain, same DTB, `Image dtbs` (no kernel modules — the buildroot ramdisk loads none) plus the kselftest collections in `KSELFTEST_TARGETS` packed as `kselftest.tar.xz`, then a `gh release upload --clobber` to the channel. On the workstation, inside the kernel checkout:
 
   ```
   # first time only: the .config. Your existing rv2-build-and-send.sh .config works as-is;
@@ -158,7 +158,7 @@ Three files in `/srv/lava/rv2/`:
   ~/.WORKDIR/linux-kernel-notes/scripts/kernel_build_scripts/opirv2/rv2-build-and-send-lava.sh
   ```
 
-  The script refuses to build without the `ARCH_SPACEMIT`/CCU/reset/pinctrl/GPIO symbols and warns if `SPACEMIT_K1_EMAC` is not built in (fine for ramdisk jobs, fatal for NFS-root ones). It leaves `KVER` in `/srv/lava/rv2/` so you can tell which build is staged. `LAVA_HOST`, `LAVA_DIR`, `CROSS` are the config block at the top.
+  The script refuses to build without the `ARCH_SPACEMIT`/CCU/reset/pinctrl/GPIO symbols and warns if `SPACEMIT_K1_EMAC` is not built in (fine for ramdisk jobs, fatal for NFS-root ones). The release notes of each channel carry the kernel version and build time, so the release page tells you what is currently staged. `GH_REPO` and `CROSS` are the config block at the top. Note the trade-off this flow buys its portability with: every job — the health check included — now needs internet to fetch the kernel; if flaky office internet ever starts flipping the device to Bad, point just the health check back at local `file://` copies.
 
   The DTB name is the upstream one your board already boots with (`fdtfile=spacemit/k1-orangepi-rv2.dtb` in `orangepiEnv.txt` after `rv2-install-on-board.sh`), not the BSP `ky/x1_orangepi-rv2.dtb`; the LAVA template's `booti` line matches the manual `booti` that works on this board.
 
@@ -291,10 +291,10 @@ actions:
     to: tftp
     os: oe
     kernel:
-      url: file:///srv/lava/rv2/Image
+      url: https://github.com/alitariq4589/lava-webserver-riscv/releases/download/rv2-latest/Image
       type: image
     dtb:
-      url: file:///srv/lava/rv2/k1-orangepi-rv2.dtb
+      url: https://github.com/alitariq4589/lava-webserver-riscv/releases/download/rv2-latest/k1-orangepi-rv2.dtb
     ramdisk:
       url: file:///srv/lava/rv2/rootfs.cpio.gz
       compression: gz
@@ -366,6 +366,12 @@ Three things that this NFS/Debian path needs, all verified against jobs 302–30
 - **Prompt.** The `trixie-kselftest` rootfs auto-logs root into a busybox-style shell whose prompt is `/ # `, not bash's `root@host:~#`. The boot action must list `/ # ` in `prompts:` or `login-action` times out ~9 min after a fully successful boot and NFS mount. (The job keeps `root@(.*):[/~]#` as a second pattern for forward-compat.)
 - **`net.ifnames=0`** in `base_kernel_args` (device-type template). Without it the Debian initrd's systemd-udev renames `eth0` -> `end0` mid-boot; the kernel `ip=...:eth0:off` config and the initramfs NFS scripts both key on `eth0`, so the initramfs spends ~3 min in "Waiting up to 180 secs for eth0 to become available / SIOCGIFINDEX: No such device" before falling through. The root still mounts (kernel-level IP-Config brought the link up at 2.7 s), but the stall is pure waste and eats the boot timeout. `net.ifnames=0` keeps the interface named `eth0` end to end. Harmless to the buildroot health check (no systemd, no rename).
 - **`SKIPFILE: "none"`.** `kselftest.yaml` always passes `-S "${SKIPFILE}"` and defaults it to `""`; `kselftest.sh`'s `-S` handler tests `[ -z "${OPTARG##*http*}" ]`, which is *true* for an empty string, so it treats `''` as an http URL, runs `wget ''` ("Prepended http:// to ''", "Invalid host name"), and `exit 1`s during option parsing — before it ever looks for `/opt/kselftest`. Any non-empty token that contains neither `http` nor a `.yaml` suffix routes to the plain-skipfile branch instead; the file (`<def-dir>/none`) doesn't exist, so the later `[ -f "${SKIPFILE}" ]` is false and no skips are applied. This is an upstream bug in the Linaro definition (worth a one-line fix: guard the empty case).
+
+### Memory-bug hunting (KASAN / kmemleak)
+
+The bug detectors are kernel configs, not LAVA features — the lab's job is to boot a kernel that has them on, make the drivers run, and turn the console splats into red results (LAVA already pattern-matches `BUG: KASAN:` etc. on every boot). `DEBUG=1 rv2-build-and-send-lava.sh` builds the same tree with KASAN + KFENCE + kmemleak + lockdep + `DEBUG_ATOMIC_SLEEP` layered on (your `.config` is restored on exit) and ships it as `Image-debug`; `Lava_job_template/orangepi-rv2-memdebug.yaml` (save as `~/orangepi-rv2-memdebug.yaml`) boots it on the NFS root, runs kselftest, loops PCIe remove/rescan on the NVMe to exercise teardown/probe paths, checks dmesg for KASAN/UBSAN/lockdep reports, and finishes with a double kmemleak scan — a non-empty `/sys/kernel/debug/kmemleak` fails the `kmemleak-clean` case and its backtraces land in the job log. Expect 2–4x slower everything, hence the job's longer timeouts; keep the fast defconfig kernel as the health check and run this one nightly or when touching a driver. When developing a driver (say the QSPI or DMA gaps above), point the remove/rescan loop — or a `bind`/`unbind` loop on the new device — at it and this job is the pre-submission leak test, run on hardware.
+
+To *prove* the detectors fire (a demo, not a regression run), build with `DEMO=1 DEBUG=1`: it additionally enables `LKDTM` and `SAMPLE_KMEMLEAK`, the kernel's own deliberately-buggy test code. On that kernel the same memdebug job triggers a real use-after-free through `/sys/kernel/debug/provoke-crash/DIRECT` (a live `BUG: KASAN: use-after-free` splat lands in the job log and fails `dmesg-clean`) and the kmemleak scan lists the sample module's planted leaks (failing `kmemleak-clean` with backtraces). The trigger step is guarded on LKDTM's debugfs file existing, so normal debug kernels skip it. Always present such results as fault injection — the planted-bug run validates the detector; the clean run is the regression baseline.
 
 Reading the results: a `shardfile-<collection>: fail` test case means that collection has no `^<collection>:` lines in `kselftest-list.txt` — its tests never cross-compiled/installed on the workstation, so it isn't in the tarball at all (`kselftest-install` silently keeps going past per-target build failures). `rv2-build-and-send-lava.sh` warns about this at pack time. The `dt` collection's per-node fails are the *measurement*, not an infra problem: each `fail` is a DT node whose compatible has no driver bound in the running kernel — the RV2's mainline driver-gap list, and the overall `dt_test_unprobed_devices_sh` case stays `fail` until every node probes (or a board skipfile encodes the known gaps so only regressions stand out).
 

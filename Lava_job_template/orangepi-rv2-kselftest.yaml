@@ -27,10 +27,10 @@ actions:
     to: tftp
     os: debian
     kernel:
-      url: file:///srv/lava/rv2/Image
+      url: https://github.com/alitariq4589/lava-webserver-riscv/releases/download/rv2-latest/Image
       type: image
     dtb:
-      url: file:///srv/lava/rv2/k1-orangepi-rv2.dtb
+      url: https://github.com/alitariq4589/lava-webserver-riscv/releases/download/rv2-latest/k1-orangepi-rv2.dtb
     ramdisk:
       url: file:///srv/lava/rv2/trixie-kselftest.initrd.cpio.gz
       compression: gz
@@ -38,7 +38,7 @@ actions:
       url: file:///srv/lava/rv2/trixie-kselftest.rootfs.tar.xz
       compression: xz
     modules:
-      url: file:///srv/lava/rv2/kselftest.tar.xz
+      url: https://github.com/alitariq4589/lava-webserver-riscv/releases/download/rv2-latest/kselftest.tar.xz
       compression: xz
 
 - boot:
