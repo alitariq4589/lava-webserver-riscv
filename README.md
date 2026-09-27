@@ -52,4 +52,6 @@ Documentation chronological sequence is as follows.
 
 ## Automation
 
+[`.github/workflows/rv2-kernel.yml`](/.github/workflows/rv2-kernel.yml) is the build side: every night it pulls mainline, builds the Orange Pi RV2 kernels (normal and memory-debug) from the [`configs/`](/configs/) fragments, publishes them to the rolling release channels the LAVA jobs download from, and submits the jobs to the lab — the kernel build no longer needs a private workstation. A manual run can plant the kernel's own LKDTM test bug in the debug kernel to demonstrate the KASAN pipeline end to end.
+
 [`ansible/kernelci-host.yml`](/ansible/kernelci-host.yml) applies the whole host-side configuration (packages, LAVA settings, board network, ser2net, device-type/device/health-check files, rootfs images, LAVA registration), so a host rebuild — or the next board — doesn't mean repeating the manual steps. The playbook header lists what it deliberately leaves out (board U-Boot env, workstation builds, the public domain on the edge proxy, PDU credentials).

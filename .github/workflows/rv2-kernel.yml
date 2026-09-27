@@ -1,0 +1,177 @@
+# Nightly kernel CI for the Orange Pi RV2 (SpacemiT Ky X1 / K1).
+#
+# Pulls mainline, builds the normal and the memory-debug kernel from the
+# checked-in configs/ fragments, publishes Image(-debug) + dtb +
+# kselftest.tar.xz + BUILD-INFO.txt to the rolling release channels the LAVA
+# jobs download from (rv2-latest / rv2-debug, assets replaced in place so the
+# job URLs never change), then submits the kselftest and memdebug jobs to the
+# lab. Nothing in the per-build pipeline is private: tree, config, build and
+# artifacts are all reproducible from this public repo.
+#
+# Manual runs (Actions -> rv2-kernel -> Run workflow) can build any
+# tree/branch, and `demo: true` plants LKDTM in the debug kernel — the
+# fault-injection demo (a real use-after-free caught live by KASAN on the
+# board) is a button on this repo. The next nightly run replaces it with a
+# clean debug kernel again.
+#
+# Job submission needs two repo secrets (Settings -> Secrets and variables ->
+# Actions): LAVA_USER and LAVA_TOKEN (LAVA web UI -> username menu -> API ->
+# Tokens). Until they exist, builds still publish and submission is skipped.
+
+name: rv2-kernel
+
+on:
+  schedule:
+    - cron: '17 21 * * *'   # nightly 02:17 PKT; results on the board by morning
+  workflow_dispatch:
+    inputs:
+      tree:
+        description: kernel git URL
+        default: https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git
+      ref:
+        description: branch or tag
+        default: master
+      demo:
+        description: plant LKDTM in the debug kernel (fault-injection demo, never a regression run)
+        type: boolean
+        default: false
+
+permissions:
+  contents: write   # gh release upload to this repo's channels
+
+concurrency:
+  group: rv2-kernel
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - channel: rv2-latest
+            debug: '0'
+          - channel: rv2-debug
+            debug: '1'
+    env:
+      TREE: ${{ inputs.tree || 'https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git' }}
+      REF: ${{ inputs.ref || 'master' }}
+      DEMO: ${{ inputs.demo || false }}
+      CROSS: riscv64-linux-gnu-
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            gcc-riscv64-linux-gnu flex bison bc libssl-dev libelf-dev xz-utils rsync
+
+      - name: Clone kernel (shallow)
+        run: git clone --depth=1 --branch "$REF" "$TREE" linux
+
+      - name: Configure (defconfig + fragments)
+        working-directory: linux
+        run: |
+          make ARCH=riscv CROSS_COMPILE="$CROSS" defconfig
+          frags="../configs/rv2.config"
+          if [ "${{ matrix.debug }}" = "1" ]; then
+            frags="$frags ../configs/rv2-memdebug.config"
+            if [ "$DEMO" = "true" ]; then
+              echo "DEMO build: planting LKDTM in the debug kernel"
+              frags="$frags ../configs/rv2-demo.config"
+            fi
+          fi
+          scripts/kconfig/merge_config.sh -m .config $frags
+          make ARCH=riscv CROSS_COMPILE="$CROSS" olddefconfig
+          # A critical symbol dropped by olddefconfig means a Kconfig
+          # dependency changed upstream: fail here, not on the board.
+          for s in ARCH_SPACEMIT SPACEMIT_K1_CCU RESET_SPACEMIT_K1 PINCTRL_SPACEMIT_K1 GPIO_SPACEMIT_K1; do
+            grep -q "^CONFIG_${s}=y" .config || { echo "::error::CONFIG_${s} missing after olddefconfig"; exit 1; }
+          done
+          if [ "${{ matrix.debug }}" = "1" ]; then
+            grep -q '^CONFIG_KASAN=y' .config || { echo "::error::CONFIG_KASAN missing after olddefconfig"; exit 1; }
+            if [ "$DEMO" = "true" ] && ! grep -q '^CONFIG_LKDTM=y' .config; then
+              echo "::warning::LKDTM did not survive olddefconfig — the demo trigger will be skipped on the board"
+            fi
+          fi
+
+      - name: Build Image + dtbs
+        working-directory: linux
+        run: |
+          make ARCH=riscv CROSS_COMPILE="$CROSS" -j"$(nproc)" Image dtbs
+          test -f arch/riscv/boot/dts/spacemit/k1-orangepi-rv2.dtb \
+            || { echo "::error::k1-orangepi-rv2.dtb not built"; exit 1; }
+
+      - name: Build kselftest (size dt)
+        working-directory: linux
+        run: |
+          make ARCH=riscv CROSS_COMPILE="$CROSS" -j"$(nproc)" \
+               TARGETS="size dt" INSTALL_PATH="$PWD/kselftest_install" kselftest-install
+          test -x kselftest_install/run_kselftest.sh \
+            || { echo "::error::run_kselftest.sh missing — selftests build failed"; exit 1; }
+          # kselftest-install keeps going past per-target build failures and the
+          # LAVA job would then report a meaningless shardfile-<name> fail; make
+          # a missing collection fatal here instead.
+          for t in size dt; do
+            grep -q "^${t}:" kselftest_install/kselftest-list.txt \
+              || { echo "::error::kselftest collection '${t}' did not build/install"; exit 1; }
+          done
+          stage="$(mktemp -d)"
+          mkdir -p "$stage/opt"
+          cp -r kselftest_install "$stage/opt/kselftest"
+          tar -C "$stage" -cJf kselftest.tar.xz opt
+
+      - name: Publish to release channel
+        working-directory: linux
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CHANNEL: ${{ matrix.channel }}
+        run: |
+          KVER="$(cat include/config/kernel.release)"
+          {
+            echo "$KVER"
+            echo "source $TREE @ $(git rev-parse HEAD) ($REF)"
+            echo "built $(date -u '+%F %T') UTC by GitHub Actions run ${{ github.run_id }}"
+            echo "KSELFTEST_TARGETS='size dt' DEBUG=${{ matrix.debug }} DEMO=$DEMO"
+          } > BUILD-INFO.txt
+          SHIP=(arch/riscv/boot/dts/spacemit/k1-orangepi-rv2.dtb kselftest.tar.xz BUILD-INFO.txt)
+          if [ "${{ matrix.debug }}" = "1" ]; then
+            cp arch/riscv/boot/Image Image-debug   # asset name = file name
+            SHIP+=(Image-debug)
+          else
+            SHIP+=(arch/riscv/boot/Image)
+          fi
+          gh release view "$CHANNEL" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || \
+            gh release create "$CHANNEL" --repo "$GITHUB_REPOSITORY" \
+               --title "$CHANNEL (rolling)" --notes "rolling artifact channel"
+          gh release upload "$CHANNEL" "${SHIP[@]}" --repo "$GITHUB_REPOSITORY" --clobber
+          echo "**$CHANNEL** <- \`$KVER\` (DEMO=$DEMO)" >> "$GITHUB_STEP_SUMMARY"
+
+  submit:
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Submit LAVA jobs
+        env:
+          LAVA_USER: ${{ secrets.LAVA_USER }}
+          LAVA_TOKEN: ${{ secrets.LAVA_TOKEN }}
+        run: |
+          if [ -z "$LAVA_USER" ] || [ -z "$LAVA_TOKEN" ]; then
+            echo "LAVA_USER/LAVA_TOKEN secrets not set — builds published, job submission skipped" \
+              | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          pipx install lavacli
+          uri="https://${LAVA_USER}:${LAVA_TOKEN}@kernelci.cloud-v.co/RPC2"
+          for job in Lava_job_template/orangepi-rv2-kselftest.yaml \
+                     Lava_job_template/orangepi-rv2-memdebug.yaml; do
+            id="$(lavacli --uri "$uri" jobs submit "$job")"
+            echo "submitted $(basename "$job") -> https://kernelci.cloud-v.co/scheduler/job/$id" \
+              | tee -a "$GITHUB_STEP_SUMMARY"
+          done

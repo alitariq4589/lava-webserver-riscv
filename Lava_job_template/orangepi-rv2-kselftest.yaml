@@ -1,10 +1,10 @@
 # Orange Pi RV2: NFS root (KernelCI Debian trixie-kselftest, riscv64) + kselftest.
 #
-# /srv/lava/rv2/Image, k1-orangepi-rv2.dtb        mainline build (rv2-build-and-send-lava.sh)
+# Image, k1-orangepi-rv2.dtb, kselftest.tar.xz    rv2-latest release channel (built nightly by
+#                                                  .github/workflows/rv2-kernel.yml, or manually
+#                                                  by rv2-build-and-send-lava.sh)
 # /srv/lava/rv2/trixie-kselftest.rootfs.tar.xz     storage.kernelci.org .../trixie-kselftest/<ver>/riscv64/full.rootfs.tar.xz
 # /srv/lava/rv2/trixie-kselftest.initrd.cpio.gz    same dir, initrd.cpio.gz (mounts the NFS root)
-# /srv/lava/rv2/kselftest.tar.xz                   opt/kselftest/... built from the same tree
-#                                                  (make -C tools/testing/selftests TARGETS=... install)
 # Host needs nfs-kernel-server; LAVA exports the extracted rootfs per job.
 
 device_type: orangepi-rv2
@@ -66,7 +66,10 @@ actions:
       params:
         SKIP_INSTALL: "true"
         KSELFTEST_PATH: /opt/kselftest
-        TST_CMDFILES: "size dt exec"
+        # exec never cross-compiles for riscv here, ships nothing, and only
+        # produced a permanent shardfile-exec fail — keep this list in sync
+        # with what the build actually installs.
+        TST_CMDFILES: "size dt"
         # kselftest.sh mishandles an empty -S: '' is misread as an http URL and
         # it dies on `wget ''`. A non-empty, non-url, non-.yaml token routes to
         # the plain-skipfile branch; the file doesn't exist so no skips apply.
