@@ -35,13 +35,23 @@ on:
         description: plant LKDTM in the debug kernel (fault-injection demo, never a regression run)
         type: boolean
         default: false
+      channel_prefix:
+        description: >-
+          release channel prefix. 'rv2' (the default) publishes to the real
+          rv2-latest/rv2-debug channels the nightly and the health check use;
+          'rv2-dev' publishes to rv2-dev-latest/rv2-dev-debug and rewrites the
+          submitted jobs to fetch from there — use it for fork/patch runs so
+          experimental kernels never overwrite the clean mainline channels.
+        default: rv2
 
 permissions:
   contents: write   # gh release upload to this repo's channels
 
 concurrency:
-  group: rv2-kernel
-  cancel-in-progress: false
+  # dev runs queue separately from the nightly, and a newer push to the same
+  # dev channel cancels the stale run; the real channels never self-cancel.
+  group: rv2-kernel-${{ inputs.channel_prefix || 'rv2' }}
+  cancel-in-progress: ${{ (inputs.channel_prefix || 'rv2') != 'rv2' }}
 
 jobs:
   build:
@@ -51,10 +61,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - channel: rv2-latest
-            debug: '0'
-          - channel: rv2-debug
-            debug: '1'
+          - debug: '0'
+          - debug: '1'
     env:
       TREE: ${{ inputs.tree || 'https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git' }}
       REF: ${{ inputs.ref || 'master' }}
@@ -129,7 +137,7 @@ jobs:
         working-directory: linux
         env:
           GH_TOKEN: ${{ github.token }}
-          CHANNEL: ${{ matrix.channel }}
+          CHANNEL: ${{ inputs.channel_prefix || 'rv2' }}${{ matrix.debug == '1' && '-debug' || '-latest' }}
         run: |
           KVER="$(cat include/config/kernel.release)"
           {
@@ -170,6 +178,16 @@ jobs:
           fi
           pipx install lavacli
           uri="https://${LAVA_USER}:${LAVA_TOKEN}@kernelci.cloud-v.co/RPC2"
+          # Point the jobs at this run's channels. With the default prefix the
+          # sed is a no-op; for rv2-dev it rewrites the download URLs and tags
+          # the job name so dev runs are obvious in the LAVA queue.
+          PREFIX="${{ inputs.channel_prefix || 'rv2' }}"
+          sed -i "s|/releases/download/rv2-latest/|/releases/download/${PREFIX}-latest/|g; s|/releases/download/rv2-debug/|/releases/download/${PREFIX}-debug/|g" \
+            Lava_job_template/orangepi-rv2-kselftest.yaml Lava_job_template/orangepi-rv2-memdebug.yaml
+          if [ "$PREFIX" != "rv2" ]; then
+            sed -i "s|^job_name: \(.*\)|job_name: \1 [${PREFIX}]|" \
+              Lava_job_template/orangepi-rv2-kselftest.yaml Lava_job_template/orangepi-rv2-memdebug.yaml
+          fi
           for job in Lava_job_template/orangepi-rv2-kselftest.yaml \
                      Lava_job_template/orangepi-rv2-memdebug.yaml; do
             id="$(lavacli --uri "$uri" jobs submit "$job")"
