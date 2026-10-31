@@ -1,0 +1,54 @@
+# Orange Pi RV2: boot-only check of the memory-debug kernel on NFS root.
+#
+# The memdebug job's deploy and boot, without the kselftest overlay and
+# without tests: Complete means the debug kernel reached a root shell,
+# Incomplete means it did not within the boot timeout. A good debug kernel
+# needs about 3 minutes for the whole boot action (power cycle, TFTP, kernel
+# to login), so 8 minutes leaves room while keeping a hung kernel cheap.
+# High priority, so a bisect runs ahead of the nightly jobs.
+#
+# rv2-boot-bisect.yml rewrites the two rv2-debug URLs and the job name for
+# each commit; as checked in, this boots whatever the rv2-debug channel has.
+
+device_type: orangepi-rv2
+job_name: orangepi-rv2 boot check (debug kernel, nfs root)
+priority: high
+visibility: public
+
+timeouts:
+  job:
+    minutes: 25
+  action:
+    minutes: 10
+  connection:
+    minutes: 5
+
+actions:
+- deploy:
+    timeout:
+      minutes: 10
+    to: tftp
+    os: debian
+    kernel:
+      url: https://github.com/alitariq4589/lava-webserver-riscv/releases/download/rv2-debug/Image-debug
+      type: image
+    dtb:
+      url: https://github.com/alitariq4589/lava-webserver-riscv/releases/download/rv2-debug/k1-orangepi-rv2.dtb
+    ramdisk:
+      url: file:///srv/lava/rv2/trixie-kselftest.initrd.cpio.gz
+      compression: gz
+    nfsrootfs:
+      url: file:///srv/lava/rv2/trixie-kselftest.rootfs.tar.xz
+      compression: xz
+
+- boot:
+    timeout:
+      minutes: 8
+    method: u-boot
+    commands: nfs
+    auto_login:
+      login_prompt: 'login:'
+      username: root
+    prompts:
+    - '/ # '
+    - 'root@(.*):[/~]#'

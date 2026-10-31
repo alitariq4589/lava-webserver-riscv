@@ -1,0 +1,164 @@
+# Boot bisect for the Orange Pi RV2: build the memory-debug kernel at every
+# commit in a list and boot each one once on the board.
+#
+# For "this kernel no longer boots" regressions, which the nightly cannot
+# narrow down because it only builds the tip of master. Give the commits in
+# order: usually the last good commit, every first-parent merge after it, and
+# the first bad commit (the two ends double as controls):
+#
+#   good=<last good>; bad=<first bad>
+#   gh workflow run rv2-boot-bisect.yml \
+#     -f commits="$(git rev-list --first-parent --reverse $good^..$bad | xargs)"
+#
+# Each commit gets its own build (same toolchain, defconfig and fragments as
+# the nightly's rv2-debug kernel), its own Image-debug-<sha12> and
+# k1-orangepi-rv2-<sha12>.dtb in the rv2-bisect release, and its own boot-only
+# LAVA job (orangepi-rv2-boot-debug.yaml) named
+# "rv2 boot-bisect <n> <sha12> end=<hex>". end is the value U-Boot's booti
+# prints in "Moving Image ... end=" (text_offset + image_size from the Image
+# header; RAM starts at 0 on the K1), so image size sits next to the result.
+# Complete = reached the login prompt, Incomplete = did not within 8 minutes.
+#
+# The prepare job checks the commit list, the LAVA token and the job template
+# before any build starts. Delete the artifacts when done:
+#   gh release delete rv2-bisect --cleanup-tag --yes
+
+name: rv2-boot-bisect
+
+on:
+  workflow_dispatch:
+    inputs:
+      commits:
+        description: full commit hashes to test, space separated, in order
+        required: true
+      tree:
+        description: kernel git URL that has the commits (fetched by hash)
+        default: https://github.com/torvalds/linux
+
+permissions:
+  contents: write   # gh release create/upload for the rv2-bisect release
+
+jobs:
+  prepare:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    outputs:
+      matrix: ${{ steps.list.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Number the commits
+        id: list
+        env:
+          COMMITS: ${{ inputs.commits }}
+        run: |
+          n=0; items=""
+          for c in $COMMITS; do
+            [[ "$c" =~ ^[0-9a-f]{40}$ ]] \
+              || { echo "::error::'$c' is not a full 40-character commit hash"; exit 1; }
+            n=$((n + 1))
+            items="$items{\"n\":\"$(printf %02d "$n")\",\"sha\":\"$c\"},"
+          done
+          [ "$n" -gt 0 ] || { echo "::error::no commits given"; exit 1; }
+          echo "matrix={\"include\":[${items%,}]}" >> "$GITHUB_OUTPUT"
+          echo "$n commits to build and boot" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Check the LAVA token and the job template
+        env:
+          LAVA_USER: ${{ secrets.LAVA_USER }}
+          LAVA_TOKEN: ${{ secrets.LAVA_TOKEN }}
+        run: |
+          if [ -z "$LAVA_USER" ] || [ -z "$LAVA_TOKEN" ]; then
+            echo "::error::LAVA_USER/LAVA_TOKEN secrets not set"; exit 1
+          fi
+          pipx install lavacli
+          uri="https://${LAVA_USER}:${LAVA_TOKEN}@kernelci.cloud-v.co/RPC2"
+          if ! who="$(lavacli --uri "$uri" system whoami)" || [ "$who" = "<AnonymousUser>" ]; then
+            echo "::error::LAVA did not accept the token; update the LAVA_TOKEN secret"; exit 1
+          fi
+          lavacli --uri "$uri" jobs validate Lava_job_template/orangepi-rv2-boot-debug.yaml
+
+      - name: Create the rv2-bisect release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view rv2-bisect --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || \
+            gh release create rv2-bisect --repo "$GITHUB_REPOSITORY" --prerelease \
+               --title "rv2-bisect (temporary)" --notes "boot-bisect artifacts; delete when done"
+
+  build:
+    needs: prepare
+    name: ${{ matrix.n }} ${{ matrix.sha }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
+    env:
+      CROSS: riscv64-linux-gnu-
+      N: ${{ matrix.n }}
+      SHA: ${{ matrix.sha }}
+      TREE: ${{ inputs.tree }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            gcc-riscv64-linux-gnu flex bison bc libssl-dev libelf-dev
+
+      - name: Fetch the kernel at the commit (shallow)
+        run: |
+          git init -q linux
+          git -C linux fetch -q --depth=1 "$TREE" "$SHA"
+          git -C linux checkout -q FETCH_HEAD
+          git -C linux log -1 --format='%H %s'
+
+      - name: Configure (defconfig + rv2 + memdebug fragments, as the nightly's rv2-debug)
+        working-directory: linux
+        run: |
+          make ARCH=riscv CROSS_COMPILE="$CROSS" defconfig
+          scripts/kconfig/merge_config.sh -m .config ../configs/rv2.config ../configs/rv2-memdebug.config
+          make ARCH=riscv CROSS_COMPILE="$CROSS" olddefconfig
+          for s in ARCH_SPACEMIT SPACEMIT_K1_CCU RESET_SPACEMIT_K1 PINCTRL_SPACEMIT_K1 GPIO_SPACEMIT_K1 KASAN; do
+            grep -q "^CONFIG_${s}=y" .config || { echo "::error::CONFIG_${s} missing after olddefconfig"; exit 1; }
+          done
+
+      - name: Build Image + dtbs
+        working-directory: linux
+        run: |
+          make ARCH=riscv CROSS_COMPILE="$CROSS" -j"$(nproc)" Image dtbs
+          test -f arch/riscv/boot/dts/spacemit/k1-orangepi-rv2.dtb \
+            || { echo "::error::k1-orangepi-rv2.dtb not built"; exit 1; }
+
+      - name: Publish and submit the boot job
+        working-directory: linux
+        env:
+          GH_TOKEN: ${{ github.token }}
+          LAVA_USER: ${{ secrets.LAVA_USER }}
+          LAVA_TOKEN: ${{ secrets.LAVA_TOKEN }}
+        run: |
+          short="${SHA:0:12}"
+          # booti moves the Image to RAM base + text_offset and prints end= at
+          # that plus image_size (both little-endian u64 in the Image header).
+          toff="$(od -An -t u8 -j 8 -N 8 arch/riscv/boot/Image | tr -d ' ')"
+          size="$(od -An -t u8 -j 16 -N 8 arch/riscv/boot/Image | tr -d ' ')"
+          end="$(printf '%x' $((toff + size)))"
+          cp arch/riscv/boot/Image "Image-debug-$short"
+          cp arch/riscv/boot/dts/spacemit/k1-orangepi-rv2.dtb "k1-orangepi-rv2-$short.dtb"
+          gh release upload rv2-bisect "Image-debug-$short" "k1-orangepi-rv2-$short.dtb" \
+            --repo "$GITHUB_REPOSITORY" --clobber
+
+          job=../Lava_job_template/orangepi-rv2-boot-debug.yaml
+          sed -i -e "s|/rv2-debug/Image-debug\$|/rv2-bisect/Image-debug-$short|" \
+                 -e "s|/rv2-debug/k1-orangepi-rv2.dtb\$|/rv2-bisect/k1-orangepi-rv2-$short.dtb|" \
+                 -e "s|^job_name: .*|job_name: rv2 boot-bisect $N $short end=$end|" "$job"
+          if ! grep -q "/rv2-bisect/Image-debug-$short\$" "$job" \
+             || ! grep -q "/rv2-bisect/k1-orangepi-rv2-$short.dtb\$" "$job"; then
+            echo "::error::job template URL rewrite failed"; exit 1
+          fi
+          pipx install lavacli
+          id="$(lavacli --uri "https://${LAVA_USER}:${LAVA_TOKEN}@kernelci.cloud-v.co/RPC2" jobs submit "$job")"
+          echo "$N \`$short\` end=$end $(git log -1 --format=%s | cut -c1-60) -> https://kernelci.cloud-v.co/scheduler/job/$id" \
+            | tee -a "$GITHUB_STEP_SUMMARY"
