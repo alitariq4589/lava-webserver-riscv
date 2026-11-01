@@ -72,11 +72,23 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install build dependencies
+        timeout-minutes: 30
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            gcc-riscv64-linux-gnu libc6-dev-riscv64-cross \
-            flex bison bc libssl-dev libelf-dev xz-utils rsync
+          # apt on the runners sometimes hangs for hours (Nov 1: a nightly and
+          # three bisect builds sat here until the 3 h job limit), so give each
+          # try a time limit and retry instead of waiting.
+          for try in 1 2 3; do
+            if sudo timeout 180 apt-get update && \
+               sudo timeout 300 apt-get install -y --no-install-recommends \
+                 gcc-riscv64-linux-gnu libc6-dev-riscv64-cross \
+                 flex bison bc libssl-dev libelf-dev xz-utils rsync; then
+              exit 0
+            fi
+            echo "::warning::apt-get try $try failed or timed out, retrying"
+            sudo dpkg --configure -a || true
+            sleep 30
+          done
+          exit 1
 
       - name: Clone kernel (shallow)
         run: git clone --depth=1 --branch "$REF" "$TREE" linux

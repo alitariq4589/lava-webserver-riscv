@@ -44,7 +44,17 @@
 # net.ifnames=0: the Debian NFS initrd's systemd-udev otherwise renames eth0 ->
 # end0, and the initramfs NFS scripts (looking for eth0 from the ip= arg) wait
 # ~3 min on that before falling through. Keeping the name eth0 makes NFS boot clean.
-{% set base_kernel_args = 'console=ttyS0,115200n8 earlycon=sbi net.ifnames=0' %}
+#
+# earlycon: this board's OpenSBI implements SBI v1.0, and Linux's SBI earlycon
+# needs v2.0 (DBCN) or CONFIG_RISCV_SBI_V01, so earlycon=sbi never printed
+# anything ("Malformed early option 'earlycon'") and the first ~5 s of a debug
+# boot were invisible. Use uart0 (0xd4017000, 32-bit registers) directly, with
+# no baud: given one, earlycon reprograms the divisor from a default 1.8432 MHz
+# clock (about 921600 baud on this UART); without one it keeps U-Boot's setup.
+# Keep these args short: LAVA types the whole NFS bootargs as one U-Boot
+# command (setenv bootargs '...'), about 250 characters with these args and
+# vers=3, and U-Boot's usual command-line limit is 256.
+{% set base_kernel_args = 'console=ttyS0,115200 earlycon=uart,mmio32,0xd4017000 net.ifnames=0' %}
 
 # NFS root: riscv defconfig has NFS_V2=y, which makes nfsroot default to v2; Debian's server has v2 off.
 {% set base_nfsroot_args = 'nfsroot={NFS_SERVER_IP}:{NFSROOTFS},vers=3,tcp,hard' %}

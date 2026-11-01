@@ -24,9 +24,9 @@ Two decisions keep the LAVA side identical in shape to the existing `banana-pi-f
 - The board's saved U-Boot env gets `bootcmd='echo LAVA'`, so after power-on it drops straight to `=>`. LAVA never has to interrupt an autoboot countdown (the stock build has a 0-second, keyed countdown that cannot be interrupted reliably).
 - The device-type template feeds `base-uboot.jinja2` the pieces it expects (static `ipaddr` command, 64-bit `fdt_high`/`initrd_high`, `booti_*` load addresses — kernel `0x11000000`, ramdisk `0x21000000`, DTB `0x31000000`, the BPI-F3 layout — `tftpboot` load lines, `uboot_mkimage_arch = riscv`). The base template then composes the `ramdisk` and `nfs` methods itself and ends them with `{BOOTX}` = `booti <kernel> <ramdisk> <dtb>`, so the job just says `commands: ramdisk`. LAVA wraps the ramdisk in a U-Boot legacy header (`mkimage -A riscv -T ramdisk`) before serving it, which is why `booti` takes the ramdisk address without a size and why `uboot_mkimage_arch` must be `riscv`. Two base-template facts drove this: it names the boot method `ramdisk` (there is no `tftp` method), and its default load lines say `tftp`, which is ambiguous on this U-Boot because `tftpput`/`tftpsrv` are built in.
 
-Verified on 2026-09-18: mainline 7.3.0-rc1 + upstream DTB + the KernelCI buildroot ramdisk boot to a shell on the RV2 with exactly this command list (PCIe root ports up, NVMe enumerated); the three kernel warnings seen (`Malformed early option 'earlycon'`, `mmc0: Failed to initialize a non-removable card`, `OPP table can't be empty`) are benign.
+Verified on 2026-09-18: mainline 7.3.0-rc1 + upstream DTB + the KernelCI buildroot ramdisk boot to a shell on the RV2 with exactly this command list (PCIe root ports up, NVMe enumerated); the kernel warnings `mmc0: Failed to initialize a non-removable card` and `OPP table can't be empty` are benign. A third one seen then, `Malformed early option 'earlycon'`, was not: it meant `earlycon=sbi` printed nothing (see the `base_kernel_args` comment in step 7).
 
-This coexists with the existing USB-Ubuntu development flow (`rv2-build-and-send.sh` / `rv2-install-on-board.sh` in `linux-kernel-notes`): the USB stick can stay in the board. With `bootcmd='echo LAVA'` it is simply no longer auto-booted; `run autoboot` at the `=>` prompt boots it on demand (see step 3). The two U-Boot lessons captured in `rv2-install-on-board.sh` — `fdt_high`/`initrd_high` must be all-Fs or the FDT relocation fails, and `earlycon=sbi console=ttyS0,115200` is needed for any output — are baked into the template's command list.
+This coexists with the existing USB-Ubuntu development flow (`rv2-build-and-send.sh` / `rv2-install-on-board.sh` in `linux-kernel-notes`): the USB stick can stay in the board. With `bootcmd='echo LAVA'` it is simply no longer auto-booted; `run autoboot` at the `=>` prompt boots it on demand (see step 3). The two U-Boot lessons captured in `rv2-install-on-board.sh` — `fdt_high`/`initrd_high` must be all-Fs or the FDT relocation fails, and `console=ttyS0,115200` is needed for any output — are baked into the template's command list. (`earlycon=sbi`, also used then, turned out to do nothing on this firmware; the template now uses `earlycon=uart,mmio32,0xd4017000`.)
 
 Values used below — replace where your setup differs:
 
@@ -198,7 +198,7 @@ setenv initrd_high 0xffffffffffffffff
 tftpboot 0x11000000 Image
 tftpboot 0x31000000 k1-orangepi-rv2.dtb
 tftpboot 0x21000000 rootfs.cpio.gz
-setenv bootargs 'console=ttyS0,115200n8 earlycon=sbi root=/dev/ram0 rw'
+setenv bootargs 'console=ttyS0,115200 earlycon=uart,mmio32,0xd4017000 root=/dev/ram0 rw'
 booti 0x11000000 0x21000000:${filesize} 0x31000000
 ```
 
@@ -254,7 +254,9 @@ Create `/etc/lava-server/dispatcher-config/device-types/orangepi-rv2.jinja2` wit
 ] %}
 
 # net.ifnames=0 keeps the NIC named eth0 under the Debian NFS initrd (see step 10).
-{% set base_kernel_args = 'console=ttyS0,115200n8 earlycon=sbi net.ifnames=0' %}
+# earlycon=sbi prints nothing here (the board's OpenSBI is SBI v1.0, Linux's SBI
+# earlycon needs v2.0); uart0 directly, with no baud, works from the first line.
+{% set base_kernel_args = 'console=ttyS0,115200 earlycon=uart,mmio32,0xd4017000 net.ifnames=0' %}
 ```
 
 Register the device type and the device, give the device a dictionary that just extends the type, and review what LAVA rendered (the render comes from the server via lavacli; there is no `device-dictionary` management command in this LAVA version):

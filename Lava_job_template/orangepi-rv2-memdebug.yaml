@@ -50,8 +50,9 @@ actions:
       compression: xz
 
 - boot:
+    # A good debug boot takes about 3 minutes; 8 keeps a hung boot cheap.
     timeout:
-      minutes: 20
+      minutes: 8
     method: u-boot
     commands: nfs
     auto_login:
