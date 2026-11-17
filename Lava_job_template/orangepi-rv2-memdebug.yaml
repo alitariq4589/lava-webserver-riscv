@@ -147,6 +147,9 @@ actions:
               if grep -qw k1_pcie_suspend_noirq /proc/kallsyms; then k1=yes; else k1=no; fi
               errors='BUG:|KASAN|UBSAN:|WARNING:|possible circular locking|possible recursive locking|inconsistent lock state|failed to (suspend|resume)|Timeout waiting for L2|Host init failed|Link failed to come up|nvme.*(timeout|controller is down|Removing|aborting)'
               bad=0
+              # networkd removes eth0's address when the link drops in suspend
+              # and can hang before adding it back on an NFS root.
+              systemctl stop systemd-networkd.socket systemd-networkd.service || true
               # One cycle: a marker in the kernel log, suspend and resume, a
               # 16 MiB direct read from the SSD, then this cycle's log lines.
               cycle() {
